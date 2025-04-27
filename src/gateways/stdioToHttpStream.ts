@@ -84,17 +84,17 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
 
   const app = express()
 
-  if (corsOrigin) {
-    app.use(
-      cors({
-        origin: corsOrigin,
-        methods: 'GET, POST, DELETE, OPTIONS',
-        allowedHeaders:
-          'Content-Type, Accept, Authorization, x-api-key, Last-Event-ID',
-        exposedHeaders: 'Content-Type, Authorization, x-api-key',
-      }),
-    )
-  }
+  // Always enable CORS, but use specified origins if provided
+  app.use(
+    cors({
+      origin: corsOrigin || '*',
+      methods: 'GET, POST, DELETE, OPTIONS',
+      allowedHeaders:
+        'Content-Type, Accept, Authorization, x-api-key, Last-Event-ID',
+      exposedHeaders: 'Content-Type, Authorization, x-api-key, Mcp-Session-Id',
+      credentials: true,
+    }),
+  )
 
   app.use(bodyParser.json({ limit: '4mb' }))
 
@@ -179,6 +179,7 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
     const sessionId = req.header(sessionHeaderName)
 
     if (!sessionId) {
+      res.setHeader('Content-Type', 'application/json')
       return res.status(400).json({
         jsonrpc: '2.0',
         error: {
@@ -198,6 +199,7 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
       logger.info(`Session terminated: ${sessionId}`)
       return res.status(204).end()
     } else {
+      res.setHeader('Content-Type', 'application/json')
       return res.status(404).json({
         jsonrpc: '2.0',
         error: {
@@ -257,6 +259,7 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
     const message = req.body
 
     if (!message || typeof message !== 'object') {
+      res.setHeader('Content-Type', 'application/json')
       return res.status(400).json({
         jsonrpc: '2.0',
         error: {
@@ -317,6 +320,7 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
           // If no response was sent yet, send error
           if (sessions[sessionId]?.pendingRequests.has(requestId)) {
             sessions[sessionId].pendingRequests.delete(requestId)
+            res.setHeader('Content-Type', 'application/json')
             res.status(504).json({
               jsonrpc: '2.0',
               error: {
@@ -345,6 +349,7 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
     } else if (req.method === 'POST') {
       handlePost(req, res)
     } else {
+      res.setHeader('Content-Type', 'application/json')
       res.status(405).json({
         jsonrpc: '2.0',
         error: {
@@ -394,6 +399,7 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
                   // to any client that's still waiting for the response
                   for (const [, response] of session.responses) {
                     if (!response.writableEnded) {
+                      response.setHeader('Content-Type', 'application/json')
                       response.json(jsonMsg)
                       break
                     }
