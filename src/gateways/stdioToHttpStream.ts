@@ -57,7 +57,7 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
   logger.info(`  - batchTimeout: ${batchTimeout}ms`)
   logger.info(`  - sessionHeaderName: ${sessionHeaderName}`)
   logger.info(
-    `  - CORS: ${corsOrigin ? `enabled (${serializeCorsOrigin({ corsOrigin })})` : 'disabled'}`,
+    `  - CORS: enabled (${corsOrigin ? serializeCorsOrigin({ corsOrigin }) : '*'})`,
   )
   logger.info(
     `  - Health endpoints: ${healthEndpoints.length ? healthEndpoints.join(', ') : '(none)'}`,
