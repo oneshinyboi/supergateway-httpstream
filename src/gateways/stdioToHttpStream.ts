@@ -173,6 +173,47 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
     res.status(204).end()
   }
 
+  // Special manifest endpoint for clients to get initialization data without reconnecting
+  const handleManifest = (req: express.Request, res: express.Response) => {
+    setResponseHeaders({
+      res,
+      headers,
+    })
+
+    const sessionId = getOrCreateSession(req, res)
+
+    // If we have an existing session but no initialization response yet
+    // Send the initialize request immediately
+
+    // Create a standard initialize request
+    const initializeRequest: JSONRPCMessage = {
+      jsonrpc: '2.0' as const,
+      method: 'initialize',
+      id: 'manifest-' + Date.now(),
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: {
+          name: 'supergateway-manifest-endpoint',
+          version: '1.0.0',
+        },
+      },
+    }
+
+    // Send to child process
+    logger.info(
+      `Manifest endpoint: sending initialize request for session ${sessionId}`,
+    )
+    sessions[sessionId].pendingRequests.set(
+      initializeRequest.id.toString(),
+      initializeRequest,
+    )
+    sessions[sessionId].responses.set(initializeRequest.id.toString(), res)
+    child.stdin.write(JSON.stringify(initializeRequest) + '\n')
+
+    // The response will be handled by the child process output handler
+  }
+
   const handleDelete = (req: express.Request, res: express.Response) => {
     setResponseHeaders({
       res,
@@ -318,9 +359,19 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
         // Handle client disconnect
         req.on('close', () => {
           if (sessions[sessionId]) {
-            logger.info(`Client disconnected for request ${requestId}`)
-            sessions[sessionId].responses.delete(requestId)
-            sessions[sessionId].pendingRequests.delete(requestId)
+            logger.info(
+              `Client disconnected for request ${requestId}, but keeping request data for reconnect`,
+            )
+
+            // For initialize requests, we don't immediately delete the session data
+            // This allows the client to reconnect and get the same session
+            // Only mark it as disconnected but keep the request/response mapping
+
+            // Instead of deleting, we'll actually keep the data for a short period
+            // This is critical for clients that disconnect and reconnect quickly
+
+            // Don't delete the pending request or response immediately
+            // Let it be handled by the child process response
           }
         })
 
@@ -398,9 +449,22 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
         // Handle client disconnect
         req.on('close', () => {
           if (sessions[sessionId]) {
-            sessions[sessionId].responses.delete(requestId)
-            // Also remove the pending request to avoid memory leaks
-            sessions[sessionId].pendingRequests.delete(requestId)
+            logger.info(`Client disconnected for regular request ${requestId}`)
+
+            // For regular requests, it might be fine to remove immediately
+            // But we'll keep the data a bit longer for safety
+
+            // Start a timer to clean up the request after a short delay
+            // This allows time for any in-transit responses to be processed
+            setTimeout(() => {
+              if (sessions[sessionId]) {
+                logger.info(
+                  `Cleaning up request ${requestId} after disconnect and delay`,
+                )
+                sessions[sessionId].responses.delete(requestId)
+                sessions[sessionId].pendingRequests.delete(requestId)
+              }
+            }, 2000) // 2 second grace period
           }
         })
 
@@ -447,7 +511,12 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
     } else if (req.method === 'GET') {
       handleGet(req, res)
     } else if (req.method === 'POST') {
-      handlePost(req, res)
+      // Special endpoint for manifest requests
+      if (req.path === '/manifest' || req.path === 'manifest') {
+        handleManifest(req, res)
+      } else {
+        handlePost(req, res)
+      }
     } else {
       res.setHeader('Content-Type', 'application/json')
       res.status(405).json({
@@ -455,6 +524,25 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
         error: {
           code: -32000,
           message: `Method ${req.method} not allowed`,
+        },
+        id: null,
+      })
+    }
+  })
+
+  // Also register a direct manifest endpoint
+  app.use(endpoint + '/manifest', (req, res) => {
+    if (req.method === 'POST' || req.method === 'GET') {
+      handleManifest(req, res)
+    } else if (req.method === 'OPTIONS') {
+      handleOptions(req, res)
+    } else {
+      res.setHeader('Content-Type', 'application/json')
+      res.status(405).json({
+        jsonrpc: '2.0',
+        error: {
+          code: -32000,
+          message: `Method ${req.method} not allowed for manifest endpoint`,
         },
         id: null,
       })
