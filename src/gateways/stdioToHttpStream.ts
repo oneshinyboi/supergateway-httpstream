@@ -155,8 +155,11 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
         lastEventId: 0,
       }
       logger.info(`New session created: ${sessionId}`)
+    } else {
+      logger.info(`Using existing session: ${sessionId}`)
     }
 
+    // Always ensure the session ID is in the response headers
     res.setHeader(sessionHeaderName, sessionId)
     return sessionId
   }
@@ -278,6 +281,14 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
     // Make sure we set the content type right away
     res.setHeader('Content-Type', 'application/json')
 
+    // Special handling for initialize requests to ensure correct response
+    const isInitializeRequest = message.method === 'initialize'
+
+    // If this is an initialize request, we need to be extra careful with handling
+    if (isInitializeRequest) {
+      logger.info(`Processing initialize request for session ${sessionId}`)
+    }
+
     // Send message to child process
     child.stdin.write(JSON.stringify(message) + '\n')
 
@@ -317,6 +328,9 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
         const requestId = message.id.toString()
         sessions[sessionId].pendingRequests.set(requestId, message)
 
+        // For initialize requests, we need to wait for the response before proceeding
+        // Do not send immediate confirmation - wait for the actual response
+
         // Set up the timeout to send batch response
         setTimeout(() => {
           if (res.writableEnded) return
@@ -335,13 +349,6 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
             })
           }
         }, batchTimeout)
-
-        // Send a confirmation receipt for the request
-        res.status(202).json({
-          jsonrpc: '2.0',
-          result: { received: true },
-          id: message.id,
-        })
       } else {
         // For notifications (no ID), just send 204 No Content
         return res.status(204).end()
@@ -382,10 +389,14 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
   let buffer = ''
   child.stdout.on('data', (chunk: Buffer) => {
     buffer += chunk.toString('utf8')
-    const lines = buffer.split(/\r?\n/)
+
+    // Process complete lines only, keeping incomplete lines in the buffer
+    let lines = buffer.split(/\r?\n/)
     buffer = lines.pop() ?? ''
-    lines.forEach((line) => {
-      if (!line.trim()) return
+
+    for (const line of lines) {
+      if (!line.trim()) continue
+
       try {
         const jsonMsg = JSON.parse(line)
         logger.info('Child → HTTP:', jsonMsg)
@@ -394,13 +405,21 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
         for (const [sessionId, session] of Object.entries(sessions)) {
           try {
             // If this is a response to a specific request
-            if (jsonMsg.id) {
+            if (jsonMsg.id !== undefined) {
               const requestId = jsonMsg.id.toString()
 
               // Check if we have a pending request for this ID
               const pendingRequest = session.pendingRequests.get(requestId)
               if (pendingRequest) {
                 session.pendingRequests.delete(requestId)
+
+                // Ensure we have a complete and valid JSON-RPC response
+                const validResponse = {
+                  jsonrpc: '2.0',
+                  ...(jsonMsg.result ? { result: jsonMsg.result } : {}),
+                  ...(jsonMsg.error ? { error: jsonMsg.error } : {}),
+                  id: jsonMsg.id,
+                }
 
                 // Find if there's a specific request waiting for this response
                 // For batch mode, we might have stored the response object
@@ -410,32 +429,42 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
                   // to any client that's still waiting for the response
                   for (const [, response] of session.responses) {
                     if (!response.writableEnded) {
+                      logger.info(
+                        `Sending response for request ${requestId} to client`,
+                      )
                       response.setHeader('Content-Type', 'application/json')
-                      response.json(jsonMsg)
+                      response.json(validResponse)
                       break
                     }
                   }
                 } else {
                   // For stream mode, send event to all active connections
                   for (const [, response] of session.responses) {
-                    sendSSEEvent(response, sessionId, jsonMsg)
+                    sendSSEEvent(response, sessionId, validResponse)
                   }
                 }
               }
             } else {
+              // Ensure we have a complete and valid JSON-RPC notification
+              const validNotification = {
+                jsonrpc: '2.0',
+                ...(jsonMsg.method ? { method: jsonMsg.method } : {}),
+                ...(jsonMsg.params ? { params: jsonMsg.params } : {}),
+              }
+
               // Broadcast notifications to all clients for this session
               for (const [, response] of session.responses) {
-                sendSSEEvent(response, sessionId, jsonMsg)
+                sendSSEEvent(response, sessionId, validNotification)
               }
             }
           } catch (err) {
             logger.error(`Failed to send to session ${sessionId}:`, err)
           }
         }
-      } catch {
-        logger.error(`Child non-JSON: ${line}`)
+      } catch (err) {
+        logger.error(`Child non-JSON: ${line}, Error: ${err}`)
       }
-    })
+    }
   })
 
   child.stderr.on('data', (chunk: Buffer) => {
