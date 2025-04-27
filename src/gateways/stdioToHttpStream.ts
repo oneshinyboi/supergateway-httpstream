@@ -275,11 +275,15 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
       `HTTP → Child (session ${sessionId}): ${JSON.stringify(message)}`,
     )
 
+    // Make sure we set the content type right away
+    res.setHeader('Content-Type', 'application/json')
+
     // Send message to child process
     child.stdin.write(JSON.stringify(message) + '\n')
 
     // For stream mode, set up SSE response
     if (responseMode === 'stream') {
+      // Override the content type for SSE
       res.setHeader('Content-Type', 'text/event-stream')
       res.setHeader('Cache-Control', 'no-cache')
       res.setHeader('Connection', 'keep-alive')
@@ -331,6 +335,13 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
             })
           }
         }, batchTimeout)
+
+        // Send a confirmation receipt for the request
+        res.status(202).json({
+          jsonrpc: '2.0',
+          result: { received: true },
+          id: message.id,
+        })
       } else {
         // For notifications (no ID), just send 204 No Content
         return res.status(204).end()
