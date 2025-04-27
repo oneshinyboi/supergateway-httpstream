@@ -287,6 +287,53 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
     // If this is an initialize request, we need to be extra careful with handling
     if (isInitializeRequest) {
       logger.info(`Processing initialize request for session ${sessionId}`)
+
+      // For initialize requests in batch mode, we need a special handling approach
+      if (responseMode === 'batch') {
+        const requestId = message.id.toString()
+        sessions[sessionId].pendingRequests.set(requestId, message)
+
+        // Send message to child process
+        child.stdin.write(JSON.stringify(message) + '\n')
+
+        // Add this response to the session's responses so it can be found later
+        sessions[sessionId].responses.set(requestId, res)
+
+        // We don't need to await here - the response will be handled when the child process returns data
+
+        // Handle client disconnect
+        req.on('close', () => {
+          if (sessions[sessionId]) {
+            sessions[sessionId].responses.delete(requestId)
+            sessions[sessionId].pendingRequests.delete(requestId)
+          }
+        })
+
+        // Set up timeout for the initialize request
+        setTimeout(() => {
+          if (res.writableEnded) return
+
+          // If the request is still pending, it timed out
+          if (sessions[sessionId]?.pendingRequests.has(requestId)) {
+            sessions[sessionId].pendingRequests.delete(requestId)
+            sessions[sessionId].responses.delete(requestId)
+
+            logger.error(`Initialize request timed out after ${batchTimeout}ms`)
+            res.setHeader('Content-Type', 'application/json')
+            return res.status(504).json({
+              jsonrpc: '2.0',
+              error: {
+                code: -32000,
+                message: 'Initialize request timeout',
+              },
+              id: message.id,
+            })
+          }
+        }, batchTimeout)
+
+        // Return without sending a response yet - it will be sent when the child process responds
+        return
+      }
     }
 
     // Send message to child process
@@ -328,8 +375,19 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
         const requestId = message.id.toString()
         sessions[sessionId].pendingRequests.set(requestId, message)
 
-        // For initialize requests, we need to wait for the response before proceeding
-        // Do not send immediate confirmation - wait for the actual response
+        // Add this response to the session's responses
+        // This is critical for the child process output handler to find this response
+        // when it needs to send the response back to the client
+        sessions[sessionId].responses.set(requestId, res)
+
+        // Handle client disconnect
+        req.on('close', () => {
+          if (sessions[sessionId]) {
+            sessions[sessionId].responses.delete(requestId)
+            // Also remove the pending request to avoid memory leaks
+            sessions[sessionId].pendingRequests.delete(requestId)
+          }
+        })
 
         // Set up the timeout to send batch response
         setTimeout(() => {
@@ -338,15 +396,24 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
           // If no response was sent yet, send error
           if (sessions[sessionId]?.pendingRequests.has(requestId)) {
             sessions[sessionId].pendingRequests.delete(requestId)
+            sessions[sessionId].responses.delete(requestId)
+
+            // Make sure we set the content type header
             res.setHeader('Content-Type', 'application/json')
-            res.status(504).json({
+
+            // Send timeout error as a proper JSON-RPC response
+            const timeoutResponse = {
               jsonrpc: '2.0',
               error: {
                 code: -32000,
                 message: 'Request timeout',
               },
               id: message.id,
-            })
+            }
+            res.status(504).json(timeoutResponse)
+            logger.error(
+              `Request ${requestId} timed out after ${batchTimeout}ms`,
+            )
           }
         }, batchTimeout)
       } else {
@@ -399,7 +466,7 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
 
       try {
         const jsonMsg = JSON.parse(line)
-        logger.info('Child → HTTP:', jsonMsg)
+        logger.info('Child → HTTP:', JSON.stringify(jsonMsg))
 
         // Process response for all active sessions
         for (const [sessionId, session] of Object.entries(sessions)) {
@@ -407,35 +474,72 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
             // If this is a response to a specific request
             if (jsonMsg.id !== undefined) {
               const requestId = jsonMsg.id.toString()
+              logger.info(
+                `Processing response for request ${requestId} in session ${sessionId}`,
+              )
 
               // Check if we have a pending request for this ID
               const pendingRequest = session.pendingRequests.get(requestId)
               if (pendingRequest) {
                 session.pendingRequests.delete(requestId)
+                logger.info(
+                  `Found pending request for ${requestId}, sending response`,
+                )
 
                 // Ensure we have a complete and valid JSON-RPC response
+                // For initialization requests, this is critical to have exactly the right format
                 const validResponse = {
                   jsonrpc: '2.0',
-                  ...(jsonMsg.result ? { result: jsonMsg.result } : {}),
-                  ...(jsonMsg.error ? { error: jsonMsg.error } : {}),
+                  result: jsonMsg.result !== undefined ? jsonMsg.result : null,
+                  error: jsonMsg.error || null,
                   id: jsonMsg.id,
                 }
 
+                // Remove null properties to keep the response clean
+                if (validResponse.error === null) delete validResponse.error
+
+                // Special handling for initialize responses
+                const isInitializeResponse =
+                  'method' in pendingRequest &&
+                  pendingRequest.method === 'initialize'
+                if (isInitializeResponse) {
+                  logger.info(
+                    `Sending initialize response for session ${sessionId}`,
+                  )
+                }
+
                 // Find if there's a specific request waiting for this response
-                // For batch mode, we might have stored the response object
                 if (responseMode === 'batch') {
-                  // In a real implementation, we would need to track which response belongs
-                  // to which request, but for simplicity we'll just return the result
-                  // to any client that's still waiting for the response
+                  // For batch mode responses in HTTP Stream
+                  let sentResponse = false
+
+                  // First try to find a response specific to this request
                   for (const [, response] of session.responses) {
                     if (!response.writableEnded) {
                       logger.info(
-                        `Sending response for request ${requestId} to client`,
+                        `Sending batch response for request ${requestId} to client`,
                       )
+
+                      // Make sure we have proper headers
                       response.setHeader('Content-Type', 'application/json')
-                      response.json(validResponse)
+
+                      // Send the valid response
+                      const responseString = JSON.stringify(validResponse)
+                      logger.info(`Response payload: ${responseString}`)
+
+                      response.write(responseString)
+                      response.end()
+                      sentResponse = true
                       break
                     }
+                  }
+
+                  // If we couldn't find a specific response handler,
+                  // this might be a race condition or timing issue
+                  if (!sentResponse) {
+                    ;(logger.warn || logger.error)(
+                      `No active response handler for request ${requestId} in session ${sessionId}`,
+                    )
                   }
                 } else {
                   // For stream mode, send event to all active connections
@@ -443,26 +547,37 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
                     sendSSEEvent(response, sessionId, validResponse)
                   }
                 }
+              } else {
+                ;(logger.warn || logger.error)(
+                  `No pending request found for ID ${requestId} in session ${sessionId}`,
+                )
               }
             } else {
               // Ensure we have a complete and valid JSON-RPC notification
               const validNotification = {
                 jsonrpc: '2.0',
-                ...(jsonMsg.method ? { method: jsonMsg.method } : {}),
-                ...(jsonMsg.params ? { params: jsonMsg.params } : {}),
+                method: jsonMsg.method || '',
+                params: jsonMsg.params || null,
               }
+
+              // Remove null properties
+              if (validNotification.params === null)
+                delete validNotification.params
 
               // Broadcast notifications to all clients for this session
               for (const [, response] of session.responses) {
                 sendSSEEvent(response, sessionId, validNotification)
               }
             }
-          } catch (err) {
+          } catch (error) {
+            const err = error as Error
             logger.error(`Failed to send to session ${sessionId}:`, err)
+            logger.error(err.stack || err.message || String(err))
           }
         }
-      } catch (err) {
-        logger.error(`Child non-JSON: ${line}, Error: ${err}`)
+      } catch (error) {
+        const err = error as Error
+        logger.error(`Child non-JSON: ${line}, Error: ${String(err)}`)
       }
     }
   })
