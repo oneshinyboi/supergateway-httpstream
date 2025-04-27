@@ -291,19 +291,34 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
       // For initialize requests in batch mode, we need a special handling approach
       if (responseMode === 'batch') {
         const requestId = message.id.toString()
+
+        // Critical debugging info
+        logger.info(
+          `Setting up init request with ID ${requestId} in session ${sessionId}`,
+        )
+
+        // VERY IMPORTANT: Store this request in the pending requests map
         sessions[sessionId].pendingRequests.set(requestId, message)
+
+        // VERY IMPORTANT: Store the response object in the responses map with the request ID as the key
+        // This is so we can find it later when the child process responds
+        sessions[sessionId].responses.set(requestId, res)
+
+        // Log the current state for debugging
+        logger.info(
+          `Session ${sessionId} now has ${sessions[sessionId].pendingRequests.size} pending requests`,
+        )
+        logger.info(
+          `Session ${sessionId} now has ${sessions[sessionId].responses.size} stored responses`,
+        )
 
         // Send message to child process
         child.stdin.write(JSON.stringify(message) + '\n')
 
-        // Add this response to the session's responses so it can be found later
-        sessions[sessionId].responses.set(requestId, res)
-
-        // We don't need to await here - the response will be handled when the child process returns data
-
         // Handle client disconnect
         req.on('close', () => {
           if (sessions[sessionId]) {
+            logger.info(`Client disconnected for request ${requestId}`)
             sessions[sessionId].responses.delete(requestId)
             sessions[sessionId].pendingRequests.delete(requestId)
           }
@@ -478,16 +493,32 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
                 `Processing response for request ${requestId} in session ${sessionId}`,
               )
 
-              // Check if we have a pending request for this ID
-              const pendingRequest = session.pendingRequests.get(requestId)
-              if (pendingRequest) {
-                session.pendingRequests.delete(requestId)
+              // Debug session state
+              logger.info(
+                `Session ${sessionId} has ${session.pendingRequests.size} pending requests`,
+              )
+              logger.info(
+                `Session ${sessionId} has ${session.responses.size} stored responses`,
+              )
+
+              // Get this specific response object directly by request ID
+              // This is critical for initialize requests
+              const directResponse = session.responses.get(requestId)
+
+              if (directResponse && !directResponse.writableEnded) {
+                // This is the direct response object for this specific request
                 logger.info(
-                  `Found pending request for ${requestId}, sending response`,
+                  `Found direct response object for request ${requestId}`,
                 )
 
+                // Get the original pending request if available
+                const pendingRequest = session.pendingRequests.get(requestId)
+
+                // Delete the request from pending regardless of what happens next
+                session.pendingRequests.delete(requestId)
+                session.responses.delete(requestId)
+
                 // Ensure we have a complete and valid JSON-RPC response
-                // For initialization requests, this is critical to have exactly the right format
                 const validResponse = {
                   jsonrpc: '2.0',
                   result: jsonMsg.result !== undefined ? jsonMsg.result : null,
@@ -495,50 +526,80 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
                   id: jsonMsg.id,
                 }
 
-                // Remove null properties to keep the response clean
+                // Remove null properties
                 if (validResponse.error === null) delete validResponse.error
 
-                // Special handling for initialize responses
-                const isInitializeResponse =
+                // Special logging for initialize responses
+                if (
+                  pendingRequest &&
                   'method' in pendingRequest &&
                   pendingRequest.method === 'initialize'
-                if (isInitializeResponse) {
+                ) {
                   logger.info(
                     `Sending initialize response for session ${sessionId}`,
                   )
                 }
 
-                // Find if there's a specific request waiting for this response
+                // CRITICAL: Make sure we set the Content-Type header
+                directResponse.setHeader('Content-Type', 'application/json')
+
+                const responseString = JSON.stringify(validResponse)
+                logger.info(`Sending direct response: ${responseString}`)
+
+                // Send the response
+                directResponse.status(200).send(responseString)
+
+                // We've handled this response
+                continue
+              }
+
+              // If we don't have a direct response, try to find the pending request
+              const pendingRequest = session.pendingRequests.get(requestId)
+              if (pendingRequest) {
+                session.pendingRequests.delete(requestId)
+                logger.info(
+                  `Found pending request for ${requestId}, looking for response handler`,
+                )
+
+                // Ensure we have a complete and valid JSON-RPC response
+                const validResponse = {
+                  jsonrpc: '2.0',
+                  result: jsonMsg.result !== undefined ? jsonMsg.result : null,
+                  error: jsonMsg.error || null,
+                  id: jsonMsg.id,
+                }
+
+                // Remove null properties
+                if (validResponse.error === null) delete validResponse.error
+
+                // Find if there's a response handler for this request
                 if (responseMode === 'batch') {
-                  // For batch mode responses in HTTP Stream
+                  // For batch mode responses
                   let sentResponse = false
 
-                  // First try to find a response specific to this request
-                  for (const [, response] of session.responses) {
+                  // Try to find any active response handler
+                  for (const [responseId, response] of session.responses) {
                     if (!response.writableEnded) {
                       logger.info(
-                        `Sending batch response for request ${requestId} to client`,
+                        `Sending batch response using response ${responseId} for request ${requestId}`,
                       )
 
-                      // Make sure we have proper headers
+                      // Set the content type header
                       response.setHeader('Content-Type', 'application/json')
 
-                      // Send the valid response
                       const responseString = JSON.stringify(validResponse)
                       logger.info(`Response payload: ${responseString}`)
 
-                      response.write(responseString)
-                      response.end()
+                      // Send the response
+                      response.status(200).send(responseString)
                       sentResponse = true
                       break
                     }
                   }
 
-                  // If we couldn't find a specific response handler,
-                  // this might be a race condition or timing issue
                   if (!sentResponse) {
                     ;(logger.warn || logger.error)(
-                      `No active response handler for request ${requestId} in session ${sessionId}`,
+                      `No active response handler found for request ${requestId} in session ${sessionId}`,
                     )
                   }
                 } else {
