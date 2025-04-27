@@ -1,9 +1,18 @@
 FROM node:20-alpine
 
-RUN npm install -g supergateway
+WORKDIR /app
+
+# Copy package files and install dependencies
+COPY package*.json ./
+RUN npm install
+
+# Copy source files and build
+COPY . .
+RUN npm run build
 
 EXPOSE 8000
 
-ENTRYPOINT ["supergateway"]
+# Run using the local build
+ENTRYPOINT ["node", "dist/index.js"]
 
 CMD ["--help"]
