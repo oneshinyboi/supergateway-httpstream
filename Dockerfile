@@ -3,8 +3,12 @@ FROM node:20-alpine
 # Install Python 3, pip, and build dependencies needed for Python extensions
 RUN apk add --no-cache python3 py3-pip gcc musl-dev python3-dev
 
-# Install uv - a fast Python package installer and runner
-RUN python3 -m pip install uv
+# Create a virtual environment to install uv
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install uv in the virtual environment
+RUN pip install uv
 
 WORKDIR /app
 
@@ -15,9 +19,6 @@ RUN npm install
 # Copy source files and build
 COPY . .
 RUN npm run build
-
-# Make sure Python and uv are in the PATH
-ENV PATH="/usr/bin:${PATH}"
 
 EXPOSE 8000
 
