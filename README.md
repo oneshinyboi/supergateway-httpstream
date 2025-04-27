@@ -1,6 +1,6 @@
-![Supergateway: Run stdio MCP servers over SSE and WS](https://raw.githubusercontent.com/supercorp-ai/supergateway/main/supergateway.png)
+![Supergateway: Run stdio MCP servers over SSE, WS, and HTTP Stream](https://raw.githubusercontent.com/supercorp-ai/supergateway/main/supergateway.png)
 
-**Supergateway** runs **MCP stdio-based servers** over **SSE (Server-Sent Events)** or **WebSockets (WS)** with one command. This is useful for remote access, debugging, or connecting to clients when your MCP server only supports stdio.
+**Supergateway** runs **MCP stdio-based servers** over **SSE (Server-Sent Events)**, **WebSockets (WS)**, or **HTTP Stream** with one command. This is useful for remote access, debugging, or connecting to clients when your MCP server only supports stdio.
 
 Supported by [Supermachine](https://supermachine.ai) (hosted MCPs), [Superinterface](https://superinterface.ai), and [Supercorp](https://supercorp.ai).
 
@@ -14,16 +14,20 @@ npx -y supergateway --stdio "uvx mcp-server-git"
 
 - **`--stdio "command"`**: Command that runs an MCP server over stdio
 - **`--sse "https://mcp-server-ab71a6b2-cd55-49d0-adba-562bc85956e3.supermachine.app"`**: SSE URL to connect to (SSE→stdio mode)
-- **`--outputTransport stdio | sse | ws`**: Output MCP transport (default: `sse` with `--stdio`, `stdio` with `--sse`)
-- **`--port 8000`**: Port to listen on (stdio→SSE or stdio→WS mode, default: `8000`)
+- **`--outputTransport stdio | sse | ws | http-stream`**: Output MCP transport (default: `sse` with `--stdio`, `stdio` with `--sse`)
+- **`--port 8000`**: Port to listen on (stdio→SSE, stdio→WS, or stdio→HTTP mode, default: `8000`)
 - **`--baseUrl "http://localhost:8000"`**: Base URL for SSE or WS clients (stdio→SSE mode; optional)
 - **`--ssePath "/sse"`**: Path for SSE subscriptions (stdio→SSE mode, default: `/sse`)
 - **`--messagePath "/message"`**: Path for messages (stdio→SSE or stdio→WS mode, default: `/message`)
-- **`--header "x-user-id: 123"`**: Add one or more headers (stdio→SSE or SSE→stdio mode; can be used multiple times)
+- **`--endpoint "/mcp"`**: HTTP Stream endpoint path (stdio→HTTP mode, default: `/mcp`)
+- **`--responseMode batch | stream`**: HTTP Stream response mode (stdio→HTTP mode, default: `batch`)
+- **`--batchTimeout 30000`**: Timeout for batch responses in ms (stdio→HTTP mode, default: `30000`)
+- **`--sessionHeaderName "Mcp-Session-Id"`**: Session header name (stdio→HTTP mode, default: `Mcp-Session-Id`)
+- **`--header "x-user-id: 123"`**: Add one or more headers (stdio→SSE, stdio→HTTP, or SSE→stdio mode; can be used multiple times)
 - **`--oauth2Bearer "some-access-token"`**: Adds an `Authorization` header with the provided Bearer token
 - **`--logLevel info | none`**: Controls logging level (default: `info`). Use `none` to suppress all logs.
-- **`--cors`**: Enable CORS (stdio→SSE or stdio→WS mode). Use `--cors` with no values to allow all origins, or supply one or more allowed origins (e.g. `--cors "http://example.com"` or `--cors "/example\\.com$/"` for regex matching).
-- **`--healthEndpoint /healthz`**: Register one or more endpoints (stdio→SSE or stdio→WS mode; can be used multiple times) that respond with `"ok"`
+- **`--cors`**: Enable CORS (stdio→SSE, stdio→WS, or stdio→HTTP mode). Use `--cors` with no values to allow all origins, or supply one or more allowed origins (e.g. `--cors "http://example.com"` or `--cors "/example\\.com$/"` for regex matching).
+- **`--healthEndpoint /healthz`**: Register one or more endpoints (stdio→SSE, stdio→WS, or stdio→HTTP mode; can be used multiple times) that respond with `"ok"`
 
 ## stdio → SSE
 
@@ -70,6 +74,48 @@ npx -y supergateway \
 
 - **WebSocket endpoint**: `ws://localhost:8000/message`
 
+## stdio → HTTP Stream
+
+Expose an MCP stdio server as an HTTP Stream server (recommended for modern web clients):
+
+```bash
+npx -y supergateway \
+    --stdio "npx -y @modelcontextprotocol/server-filesystem ./my-folder" \
+    --port 8000 --outputTransport http-stream --endpoint /mcp
+```
+
+- **HTTP Stream endpoint**: `http://localhost:8000/mcp`
+
+### HTTP Stream modes
+
+The HTTP Stream transport supports two response modes:
+
+**Batch mode** (default):
+
+```bash
+npx -y supergateway \
+    --stdio "npx -y @modelcontextprotocol/server-filesystem ./my-folder" \
+    --outputTransport http-stream --responseMode batch
+```
+
+**Stream mode** (for progressive responses):
+
+```bash
+npx -y supergateway \
+    --stdio "npx -y @modelcontextprotocol/server-filesystem ./my-folder" \
+    --outputTransport http-stream --responseMode stream
+```
+
+### HTTP Stream session management
+
+HTTP Stream provides built-in session management with the `Mcp-Session-Id` header:
+
+```bash
+npx -y supergateway \
+    --stdio "npx -y @modelcontextprotocol/server-filesystem ./my-folder" \
+    --outputTransport http-stream --sessionHeaderName "Custom-Session-Header"
+```
+
 ## Example with MCP Inspector (stdio → SSE mode)
 
 1. **Run Supergateway**:
@@ -98,7 +144,7 @@ npx -y supergateway --port 8000 --stdio "npx -y @modelcontextprotocol/server-fil
 ngrok http 8000
 ```
 
-ngrok provides a public URL for remote access. 
+ngrok provides a public URL for remote access.
 
 MCP server will be available at URL similar to: https://1234-567-890-12-456.ngrok-free.app/sse
 
@@ -217,7 +263,7 @@ Cursor can also integrate with Supergateway in SSE→stdio mode. The configurati
 
 ## Why MCP?
 
-[Model Context Protocol](https://spec.modelcontextprotocol.io/) standardizes AI tool interactions. Supergateway converts MCP stdio servers into SSE or WS services, simplifying integration and debugging with web-based or remote clients.
+[Model Context Protocol](https://spec.modelcontextprotocol.io/) standardizes AI tool interactions. Supergateway converts MCP stdio servers into SSE, WS, or HTTP Stream services, simplifying integration and debugging with web-based or remote clients. The HTTP Stream transport is the recommended modern approach for web-based MCP applications.
 
 ## Advanced Configuration
 
@@ -225,7 +271,8 @@ Supergateway emphasizes modularity:
 
 - Automatically manages JSON-RPC versioning.
 - Retransmits package metadata where possible.
-- stdio→SSE or stdio→WS mode logs via standard output; SSE→stdio mode logs via stderr.
+- stdio→SSE, stdio→WS, or stdio→HTTP mode logs via standard output; SSE→stdio mode logs via stderr.
+- HTTP Stream mode supports session management and both batch and streaming responses.
 
 ## Additional resources
 

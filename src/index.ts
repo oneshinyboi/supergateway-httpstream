@@ -2,7 +2,7 @@
 /**
  * index.ts
  *
- * Run MCP stdio servers over SSE, convert between stdio, SSE, WS.
+ * Run MCP stdio servers over SSE, HTTP Stream, or WS, convert between stdio, SSE.
  *
  * Usage:
  *   # stdio→SSE
@@ -14,6 +14,9 @@
  *
  *   # stdio→WS
  *   npx -y supergateway --stdio "npx -y @modelcontextprotocol/server-filesystem /" --outputTransport ws
+ *
+ *   # stdio→HTTP Stream
+ *   npx -y supergateway --stdio "npx -y @modelcontextprotocol/server-filesystem /" --outputTransport http-stream
  */
 
 import yargs from 'yargs'
@@ -22,6 +25,7 @@ import { Logger } from './types.js'
 import { stdioToSse } from './gateways/stdioToSse.js'
 import { sseToStdio } from './gateways/sseToStdio.js'
 import { stdioToWs } from './gateways/stdioToWs.js'
+import { stdioToHttpStream } from './gateways/stdioToHttpStream.js'
 import { headers } from './lib/headers.js'
 import { corsOrigin } from './lib/corsOrigin.js'
 
@@ -63,7 +67,7 @@ async function main() {
     })
     .option('outputTransport', {
       type: 'string',
-      choices: ['stdio', 'sse', 'ws'],
+      choices: ['stdio', 'sse', 'ws', 'http-stream'],
       default: () => {
         const args = hideBin(process.argv)
 
@@ -78,7 +82,8 @@ async function main() {
     .option('port', {
       type: 'number',
       default: 8000,
-      description: '(stdio→SSE, stdio→WS) Port for output MCP server',
+      description:
+        '(stdio→SSE, stdio→WS, stdio→HTTP) Port for output MCP server',
     })
     .option('baseUrl', {
       type: 'string',
@@ -94,6 +99,27 @@ async function main() {
       type: 'string',
       default: '/message',
       description: '(stdio→SSE, stdio→WS) Path for messages',
+    })
+    .option('endpoint', {
+      type: 'string',
+      default: '/mcp',
+      description: '(stdio→HTTP) HTTP Stream endpoint path',
+    })
+    .option('responseMode', {
+      type: 'string',
+      choices: ['batch', 'stream'],
+      default: 'batch',
+      description: '(stdio→HTTP) HTTP Stream response mode (batch or stream)',
+    })
+    .option('batchTimeout', {
+      type: 'number',
+      default: 30000,
+      description: '(stdio→HTTP) Timeout for batch responses in ms',
+    })
+    .option('sessionHeaderName', {
+      type: 'string',
+      default: 'Mcp-Session-Id',
+      description: '(stdio→HTTP) Session header name',
     })
     .option('logLevel', {
       choices: ['info', 'none'] as const,
@@ -172,6 +198,22 @@ async function main() {
           logger,
           corsOrigin: corsOrigin({ argv }),
           healthEndpoints: argv.healthEndpoint as string[],
+        })
+      } else if (argv.outputTransport === 'http-stream') {
+        await stdioToHttpStream({
+          stdioCmd: argv.stdio!,
+          port: argv.port,
+          endpoint: argv.endpoint,
+          logger,
+          corsOrigin: corsOrigin({ argv }),
+          healthEndpoints: argv.healthEndpoint as string[],
+          headers: headers({
+            argv,
+            logger,
+          }),
+          responseMode: argv.responseMode as 'batch' | 'stream',
+          batchTimeout: argv.batchTimeout,
+          sessionHeaderName: argv.sessionHeaderName,
         })
       } else {
         logStderr(`Error: stdio→${argv.outputTransport} not supported`)
