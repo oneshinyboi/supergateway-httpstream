@@ -454,8 +454,8 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
             // For regular requests, it might be fine to remove immediately
             // But we'll keep the data a bit longer for safety
 
-            // Start a timer to clean up the request after a short delay
-            // This allows time for any in-transit responses to be processed
+            // Start a timer to clean up the request after a delay
+            // This allows time for slower operations like API calls to complete
             setTimeout(() => {
               if (sessions[sessionId]) {
                 logger.info(
@@ -464,7 +464,7 @@ export async function stdioToHttpStream(args: StdioToHttpStreamArgs) {
                 sessions[sessionId].responses.delete(requestId)
                 sessions[sessionId].pendingRequests.delete(requestId)
               }
-            }, 2000) // 2 second grace period
+            }, 30000) // 30 second grace period - increased to handle slower operations
           }
         })
 
